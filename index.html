@@ -2,18 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Dungeon Crawler</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #000; overflow: hidden; touch-action: none; }
+body { background: #000; overflow: hidden; touch-action: none; height: 100dvh; height: 100vh; }
 canvas { display: block; }
 
 #hud {
   position: fixed; top: 0; left: 0; right: 0;
   display: flex; justify-content: space-between; align-items: center;
-  padding: 12px 16px; pointer-events: none;
-  font-family: monospace; font-size: 18px; color: #fff;
+  padding: max(12px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+  pointer-events: none;
+  font-family: monospace; font-size: clamp(14px, 3.5vw, 18px); color: #fff;
   text-shadow: 0 0 8px #000;
   background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent);
 }
@@ -27,21 +28,33 @@ canvas { display: block; }
 #wave-label { font-size: 16px; color: #aaddff; }
 
 #joystick-zone {
-  position: fixed; bottom: 40px; left: 40px;
-  width: 120px; height: 120px;
+  position: fixed;
+  bottom: max(28px, calc(env(safe-area-inset-bottom, 0px) + 12px));
+  left: max(28px, calc(env(safe-area-inset-left, 0px) + 12px));
+  width: clamp(100px, 22vw, 140px); height: clamp(100px, 22vw, 140px);
   background: rgba(255,255,255,0.07);
   border: 2px solid rgba(255,255,255,0.18);
   border-radius: 50%; pointer-events: none;
   touch-action: none;
+  opacity: 0.6; transition: opacity 0.2s;
 }
+#joystick-zone.active { opacity: 1; }
 #joystick-knob {
-  position: absolute; width: 44px; height: 44px;
+  position: absolute; width: 40%; height: 40%;
   background: rgba(255,255,255,0.30);
   border: 2px solid rgba(255,255,255,0.55);
   border-radius: 50%;
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
   pointer-events: none;
+}
+#touch-hint {
+  position: fixed;
+  bottom: max(8px, calc(env(safe-area-inset-bottom, 0px) + 4px));
+  left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,0.3);
+  font: clamp(10px, 2.5vw, 13px) monospace;
+  pointer-events: none; white-space: nowrap;
 }
 
 #game-over {
@@ -59,7 +72,7 @@ canvas { display: block; }
   background: #900; color: #fff; border: 2px solid #e44;
   border-radius: 6px; cursor: pointer; letter-spacing: 2px;
 }
-#game-over button:hover { background: #b00; }
+#game-over button:hover, #game-over button:active { background: #b00; }
 </style>
 </head>
 <body>
@@ -73,6 +86,7 @@ canvas { display: block; }
 </div>
 
 <div id="joystick-zone"><div id="joystick-knob"></div></div>
+<div id="touch-hint">touch &amp; drag to move</div>
 
 <div id="game-over">
   <h1>YOU DIED</h1>
@@ -412,7 +426,11 @@ function spawnWave(n) {
 // ═══════════════════════════════════════════════════════════════
 const jZone = document.getElementById('joystick-zone');
 const jKnob = document.getElementById('joystick-knob');
-const J_RADIUS = 60;
+const touchHintEl = document.getElementById('touch-hint');
+
+// Radius computed at runtime from rendered element so it stays correct when
+// the zone is responsively sized via CSS clamp() (lessons learned).
+function jRadius() { return jZone.offsetWidth / 2; }
 
 let jActive = false, jTouchId = null, jOX = 0, jOY = 0;
 let jVec = { x: 0, y: 0 };
@@ -425,10 +443,13 @@ document.addEventListener('touchstart', e => {
       jTouchId = t.identifier;
       jOX = t.clientX;
       jOY = t.clientY;
-      // Re-anchor zone visually
-      jZone.style.left = (jOX - 60) + 'px';
+      // Re-anchor zone visually under the finger
+      const r = jRadius();
+      jZone.style.left   = (jOX - r) + 'px';
       jZone.style.bottom = '';
-      jZone.style.top  = (jOY - 60) + 'px';
+      jZone.style.top    = (jOY - r) + 'px';
+      jZone.classList.add('active');
+      if (touchHintEl) touchHintEl.style.display = 'none';
       e.preventDefault();
     }
   }
@@ -437,13 +458,14 @@ document.addEventListener('touchstart', e => {
 document.addEventListener('touchmove', e => {
   for (const t of e.changedTouches) {
     if (t.identifier === jTouchId) {
+      const r = jRadius();
       let dx = t.clientX - jOX, dy = t.clientY - jOY;
       const len = Math.hypot(dx, dy);
-      const cl  = Math.min(len, J_RADIUS);
+      const cl  = Math.min(len, r);
       if (len > 0) { dx = dx/len*cl; dy = dy/len*cl; }
       jKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
-      jVec.x =  dx / J_RADIUS;
-      jVec.y = -dy / J_RADIUS;   // screen-Y inverted
+      jVec.x =  dx / r;
+      jVec.y = -dy / r;   // screen-Y inverted
       e.preventDefault();
     }
   }
@@ -455,7 +477,9 @@ const resetJoystick = e => {
       jActive = false; jTouchId = null;
       jKnob.style.transform = 'translate(-50%, -50%)';
       jVec.x = 0; jVec.y = 0;
-      jZone.style.top = ''; jZone.style.bottom = '40px'; jZone.style.left = '40px';
+      jZone.classList.remove('active');
+      // Reset to CSS-defined default position (bottom/left from stylesheet)
+      jZone.style.top = ''; jZone.style.bottom = ''; jZone.style.left = '';
     }
   }
 };
