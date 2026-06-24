@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Dungeon Crawler</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; touch-action: none; }
+canvas { display: block; }
+
+#hud {
+  position: fixed; top: 0; left: 0; right: 0;
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; pointer-events: none;
+  font-family: monospace; font-size: 18px; color: #fff;
+  text-shadow: 0 0 8px #000;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent);
+}
+#health-bar-wrap { display: flex; align-items: center; gap: 8px; }
+#health-bar {
+  width: 120px; height: 14px;
+  background: #300; border: 2px solid #c33; border-radius: 4px; overflow: hidden;
+}
+#health-fill { height: 100%; background: #e44; transition: width 0.1s; }
+#score { font-size: 20px; color: #ffd700; }
+#wave-label { font-size: 16px; color: #aaddff; }
+
+#joystick-zone {
+  position: fixed; bottom: 40px; left: 40px;
+  width: 120px; height: 120px;
+  background: rgba(255,255,255,0.07);
+  border: 2px solid rgba(255,255,255,0.18);
+  border-radius: 50%; pointer-events: none;
+  touch-action: none;
+}
+#joystick-knob {
+  position: absolute; width: 44px; height: 44px;
+  background: rgba(255,255,255,0.30);
+  border: 2px solid rgba(255,255,255,0.55);
+  border-radius: 50%;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+#game-over {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.82);
+  flex-direction: column; align-items: center; justify-content: center;
+  font-family: monospace; color: #fff;
+}
+#game-over h1 { font-size: 52px; color: #e44; margin-bottom: 14px; letter-spacing: 4px; }
+#game-over p  { font-size: 24px; margin-bottom: 10px; }
+#game-over .sub { font-size: 16px; color: #aaa; margin-bottom: 32px; }
+#game-over button {
+  padding: 14px 40px; font-size: 20px; font-family: monospace;
+  background: #900; color: #fff; border: 2px solid #e44;
+  border-radius: 6px; cursor: pointer; letter-spacing: 2px;
+}
+#game-over button:hover { background: #b00; }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div id="health-bar-wrap">
+    ❤ <div id="health-bar"><div id="health-fill"></div></div>
+  </div>
+  <div id="wave-label">Wave 1</div>
+  <div id="score">Score: 0</div>
+</div>
+
+<div id="joystick-zone"><div id="joystick-knob"></div></div>
+
+<div id="game-over">
+  <h1>YOU DIED</h1>
+  <p id="final-score">Score: 0</p>
+  <div class="sub" id="final-wave">Survived to wave 1</div>
+  <button onclick="location.reload()">PLAY AGAIN</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+"use strict";
+
+// ═══════════════════════════════════════════════════════════════
+//  CONSTANTS
+// ═══════════════════════════════════════════════════════════════
+const TILE          = 2;       // world units per tile
+const COLS          = 29;
+const ROWS          = 29;
+const PLAYER_SPEED  = 6.5;     // units / sec
+const PLAYER_RADIUS = 0.52;
+const PLAYER_MAX_HP = 10;
+
+const SWORD_RANGE     = 3.6;
+const SWORD_ARC       = Math.PI * (2/3);   // 120 °
+const SWORD_COOLDOWN  = 0.72;              // sec between swings
+const SWORD_SWEEP_DUR = 0.30;              // sweep animation duration
+const SWORD_SEGMENTS  = 18;
+
+const ENEMY_RADIUS      = 0.48;
+const ENEMY_MAX_HP      = 2;
+const ENEMY_DAMAGE      = 1;
+const ENEMY_DAMAGE_CD   = 0.75;
+const ENEMY_SPEED_BASE  = 2.8;
+const ENEMY_SPEED_SCALE = 0.08;  // per wave
+
+const VIEW_HALF = 18;   // orthographic half-height
+
+// ═══════════════════════════════════════════════════════════════
+//  DUNGEON GENERATION  (recursive-backtracker maze, then widen)
+// ═══════════════════════════════════════════════════════════════
+function buildMap(cols, rows) {
+  const map = Array.from({length: rows}, () => new Uint8Array(cols).fill(1));
+
+  function carve(x, y) {
+    map[y][x] = 0;
+    const dirs = [[0,-2],[0,2],[-2,0],[2,0]].sort(() => Math.random() - 0.5);
+    for (const [dx, dy] of dirs) {
+      const nx = x + dx, ny = y + dy;
+      if (nx > 0 && nx < cols-1 && ny > 0 && ny < rows-1 && map[ny][nx] === 1) {
+        map[y + dy/2][x + dx/2] = 0;
+        carve(nx, ny);
+      }
+    }
+  }
+  carve(1, 1);
+
+  // Randomly widen some corridors so movement feels less cramped
+  for (let y = 1; y < rows-1; y++) {
+    for (let x = 1; x < cols-1; x++) {
+      if (map[y][x] === 0 && Math.random() < 0.28) {
+        const ox = x + (Math.random() < 0.5 ? 1 : -1);
+        const oy = y + (Math.random() < 0.5 ? 1 : -1);
+        if (ox > 0 && ox < cols-1 && oy > 0 && oy < rows-1) map[oy][ox] = 0;
+      }
+    }
+  }
+  return map;
+}
+
+const MAP = buildMap(COLS, ROWS);
+
+function tileToWorld(col, row) {
+  return { x: (col - COLS / 2) * TILE, y: (row - ROWS / 2) * TILE };
+}
+
+// Collect all floor tile positions (used for enemy spawning)
+const FLOOR_TILES = [];
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS; c++) {
+    if (MAP[r][c] === 0) FLOOR_TILES.push(tileToWorld(c, r));
+  }
+}
+
+// Cheap wall test — treats map boundary as wall
+function isWallAt(wx, wy) {
+  const col = Math.round(wx / TILE + COLS / 2);
+  const row = Math.round(wy / TILE + ROWS / 2);
+  if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return true;
+  return MAP[row][col] === 1;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  THREE.JS SETUP
+// ═══════════════════════════════════════════════════════════════
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const aspect = innerWidth / innerHeight;
+const camera = new THREE.OrthographicCamera(
+  -VIEW_HALF * aspect, VIEW_HALF * aspect,
+   VIEW_HALF,         -VIEW_HALF,
+  0.1, 100
+);
+camera.position.z = 10;
+camera.lookAt(0, 0, 0);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0a);
+
+// ── Floor ──────────────────────────────────────────────────────
+{
+  const g = new THREE.PlaneGeometry(COLS * TILE, ROWS * TILE);
+  const m = new THREE.MeshBasicMaterial({ color: 0x1a1208 });
+  scene.add(new THREE.Mesh(g, m));
+}
+
+// ── Floor tile grid (subtle) ───────────────────────────────────
+{
+  const g = new THREE.PlaneGeometry(TILE * 0.96, TILE * 0.96);
+  const m = new THREE.MeshBasicMaterial({ color: 0x201610 });
+  const floors = FLOOR_TILES.length;
+  const inst  = new THREE.InstancedMesh(g, m, floors);
+  const dummy = new THREE.Object3D();
+  FLOOR_TILES.forEach(({x, y}, i) => {
+    dummy.position.set(x, y, 0.005);
+    dummy.updateMatrix();
+    inst.setMatrixAt(i, dummy.matrix);
+  });
+  inst.instanceMatrix.needsUpdate = true;
+  scene.add(inst);
+}
+
+// ── Walls — instanced meshes ───────────────────────────────────
+{
+  const wallPos = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (MAP[r][c] === 1) {
+        const { x, y } = tileToWorld(c, r);
+        wallPos.push(x, y);
+      }
+    }
+  }
+  const count = wallPos.length / 2;
+  const dummy = new THREE.Object3D();
+
+  // Base wall colour
+  const wg = new THREE.PlaneGeometry(TILE, TILE);
+  const wm = new THREE.MeshBasicMaterial({ color: 0x3e2e1e });
+  const walls = new THREE.InstancedMesh(wg, wm, count);
+  for (let i = 0; i < count; i++) {
+    dummy.position.set(wallPos[i*2], wallPos[i*2+1], 0.01);
+    dummy.updateMatrix();
+    walls.setMatrixAt(i, dummy.matrix);
+  }
+  walls.instanceMatrix.needsUpdate = true;
+  scene.add(walls);
+
+  // Inner shadow layer
+  const wg2 = new THREE.PlaneGeometry(TILE * 0.88, TILE * 0.88);
+  const wm2 = new THREE.MeshBasicMaterial({ color: 0x251a0e });
+  const walls2 = new THREE.InstancedMesh(wg2, wm2, count);
+  for (let i = 0; i < count; i++) {
+    dummy.position.set(wallPos[i*2], wallPos[i*2+1], 0.02);
+    dummy.updateMatrix();
+    walls2.setMatrixAt(i, dummy.matrix);
+  }
+  walls2.instanceMatrix.needsUpdate = true;
+  scene.add(walls2);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PLAYER MESH
+// ═══════════════════════════════════════════════════════════════
+const playerBody = new THREE.Mesh(
+  new THREE.CircleGeometry(PLAYER_RADIUS, 20),
+  new THREE.MeshBasicMaterial({ color: 0x44aaff })
+);
+playerBody.position.z = 0.1;
+scene.add(playerBody);
+
+// Facing dot
+const facingDot = new THREE.Mesh(
+  new THREE.CircleGeometry(0.13, 8),
+  new THREE.MeshBasicMaterial({ color: 0xffffff })
+);
+facingDot.position.z = 0.12;
+scene.add(facingDot);
+
+// ═══════════════════════════════════════════════════════════════
+//  SWORD ARC  (rebuilt each frame during sweep)
+// ═══════════════════════════════════════════════════════════════
+const swordMat = new THREE.MeshBasicMaterial({
+  color: 0xffdd44,
+  transparent: true,
+  opacity: 0.8,
+  side: THREE.DoubleSide
+});
+let swordMesh = null;
+
+function buildSectorGeo(radius, arcAngle, segs) {
+  const verts = [0, 0, 0];
+  for (let i = 0; i <= segs; i++) {
+    const a = -arcAngle / 2 + arcAngle * i / segs;
+    verts.push(Math.cos(a) * radius, Math.sin(a) * radius, 0);
+  }
+  const idx = [];
+  for (let i = 1; i <= segs; i++) idx.push(0, i, i + 1);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.setIndex(idx);
+  return geo;
+}
+
+function showSwordArc(px, py, facing, progress) {
+  if (swordMesh) { scene.remove(swordMesh); swordMesh.geometry.dispose(); swordMesh = null; }
+  const geo = buildSectorGeo(SWORD_RANGE, SWORD_ARC, SWORD_SEGMENTS);
+  const mat = swordMat.clone();
+  mat.opacity = 0.8 * (1 - progress * 0.6);
+  swordMesh = new THREE.Mesh(geo, mat);
+  swordMesh.position.set(px, py, 0.09);
+  swordMesh.rotation.z = facing;
+  scene.add(swordMesh);
+}
+
+function hideSwordArc() {
+  if (swordMesh) { scene.remove(swordMesh); swordMesh.geometry.dispose(); swordMesh = null; }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ENEMY CLASS
+// ═══════════════════════════════════════════════════════════════
+const _enemyGeo  = new THREE.CircleGeometry(ENEMY_RADIUS, 14);
+const _enemyMat  = new THREE.MeshBasicMaterial({ color: 0xff3333 });
+const _hpBgMat   = new THREE.MeshBasicMaterial({ color: 0x330000 });
+const _hpFillMat = new THREE.MeshBasicMaterial({ color: 0x22ee44 });
+
+class Enemy {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.hp = ENEMY_MAX_HP;
+    this.damageCooldown = 0;
+    this.dead = false;
+
+    this.body = new THREE.Mesh(_enemyGeo, _enemyMat.clone());
+    this.body.position.z = 0.1;
+    scene.add(this.body);
+
+    this.hpBg = new THREE.Mesh(new THREE.PlaneGeometry(0.85, 0.13), _hpBgMat.clone());
+    this.hpBg.position.z = 0.13;
+    scene.add(this.hpBg);
+
+    this.hpBar = new THREE.Mesh(new THREE.PlaneGeometry(0.85, 0.13), _hpFillMat.clone());
+    this.hpBar.position.z = 0.14;
+    scene.add(this.hpBar);
+  }
+
+  update(dt, px, py, speed) {
+    if (this.dead) return;
+
+    // Direct line-of-sight chase
+    const dx = px - this.x, dy = py - this.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 0.01) {
+      const vx = (dx / dist) * speed * dt;
+      const vy = (dy / dist) * speed * dt;
+      // Slide-axis collision
+      if (!isWallAt(this.x + vx, this.y))       this.x += vx;
+      if (!isWallAt(this.x,       this.y + vy))  this.y += vy;
+    }
+
+    // Sync meshes
+    this.body.position.set(this.x, this.y, 0.1);
+    this.hpBg.position.set(this.x, this.y + 0.72, 0.13);
+
+    const frac = Math.max(0, this.hp / ENEMY_MAX_HP);
+    this.hpBar.scale.x = frac;
+    this.hpBar.position.set(this.x - (1 - frac) * 0.425, this.y + 0.72, 0.14);
+
+    if (this.damageCooldown > 0) this.damageCooldown -= dt;
+  }
+
+  destroy() {
+    this.dead = true;
+    scene.remove(this.body);
+    scene.remove(this.hpBg);
+    scene.remove(this.hpBar);
+    this.body.geometry.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  GAME STATE
+// ═══════════════════════════════════════════════════════════════
+const startWorld = tileToWorld(1, 1);
+
+const player = {
+  x: startWorld.x,
+  y: startWorld.y,
+  hp: PLAYER_MAX_HP,
+  facing: 0,           // radians; 0 = right
+  swordCooldown: 0,
+  sweeping: false,
+  sweepTime: 0,
+  hitSet: null,        // enemies hit this swing
+};
+
+let enemies   = [];
+let wave      = 1;
+let score     = 0;
+let gameAlive = true;
+
+// ═══════════════════════════════════════════════════════════════
+//  WAVE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
+function spawnWave(n) {
+  const count = 3 + n * 2;
+  const px = player.x, py = player.y;
+
+  // Pick floor tiles that are far enough from the player
+  const candidates = FLOOR_TILES.filter(t => Math.hypot(t.x - px, t.y - py) > 12);
+  const pool = candidates.length > 0 ? candidates : FLOOR_TILES;
+
+  for (let i = 0; i < count; i++) {
+    const t = pool[Math.floor(Math.random() * pool.length)];
+    enemies.push(new Enemy(t.x, t.y));
+  }
+
+  document.getElementById('wave-label').textContent = `Wave ${n}`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  TOUCH JOYSTICK
+// ═══════════════════════════════════════════════════════════════
+const jZone = document.getElementById('joystick-zone');
+const jKnob = document.getElementById('joystick-knob');
+const J_RADIUS = 60;
+
+let jActive = false, jTouchId = null, jOX = 0, jOY = 0;
+let jVec = { x: 0, y: 0 };
+
+// Allow joystick touch to start anywhere on the left half of screen
+document.addEventListener('touchstart', e => {
+  for (const t of e.changedTouches) {
+    if (!jActive && t.clientX < innerWidth * 0.5) {
+      jActive  = true;
+      jTouchId = t.identifier;
+      jOX = t.clientX;
+      jOY = t.clientY;
+      // Re-anchor zone visually
+      jZone.style.left = (jOX - 60) + 'px';
+      jZone.style.bottom = '';
+      jZone.style.top  = (jOY - 60) + 'px';
+      e.preventDefault();
+    }
+  }
+}, { passive: false });
+
+document.addEventListener('touchmove', e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === jTouchId) {
+      let dx = t.clientX - jOX, dy = t.clientY - jOY;
+      const len = Math.hypot(dx, dy);
+      const cl  = Math.min(len, J_RADIUS);
+      if (len > 0) { dx = dx/len*cl; dy = dy/len*cl; }
+      jKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+      jVec.x =  dx / J_RADIUS;
+      jVec.y = -dy / J_RADIUS;   // screen-Y inverted
+      e.preventDefault();
+    }
+  }
+}, { passive: false });
+
+const resetJoystick = e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === jTouchId) {
+      jActive = false; jTouchId = null;
+      jKnob.style.transform = 'translate(-50%, -50%)';
+      jVec.x = 0; jVec.y = 0;
+      jZone.style.top = ''; jZone.style.bottom = '40px'; jZone.style.left = '40px';
+    }
+  }
+};
+document.addEventListener('touchend',    resetJoystick);
+document.addEventListener('touchcancel', resetJoystick);
+
+// ═══════════════════════════════════════════════════════════════
+//  KEYBOARD INPUT
+// ═══════════════════════════════════════════════════════════════
+const keys = new Set();
+document.addEventListener('keydown', e => keys.add(e.code));
+document.addEventListener('keyup',   e => keys.delete(e.code));
+
+function getKeyVec() {
+  let x = 0, y = 0;
+  if (keys.has('ArrowUp')    || keys.has('KeyW')) y += 1;
+  if (keys.has('ArrowDown')  || keys.has('KeyS')) y -= 1;
+  if (keys.has('ArrowLeft')  || keys.has('KeyA')) x -= 1;
+  if (keys.has('ArrowRight') || keys.has('KeyD')) x += 1;
+  const len = Math.hypot(x, y);
+  if (len > 0) { x /= len; y /= len; }
+  return { x, y };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SWORD HIT TEST
+// ═══════════════════════════════════════════════════════════════
+function enemyInArc(ex, ey) {
+  const dx = ex - player.x, dy = ey - player.y;
+  if (Math.hypot(dx, dy) > SWORD_RANGE) return false;
+  let diff = Math.atan2(dy, dx) - player.facing;
+  while (diff >  Math.PI) diff -= 2 * Math.PI;
+  while (diff < -Math.PI) diff += 2 * Math.PI;
+  return Math.abs(diff) <= SWORD_ARC / 2;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  HUD
+// ═══════════════════════════════════════════════════════════════
+const healthFill = document.getElementById('health-fill');
+const scoreEl    = document.getElementById('score');
+
+function updateHUD() {
+  healthFill.style.width = Math.max(0, player.hp / PLAYER_MAX_HP * 100) + '%';
+  scoreEl.textContent = `Score: ${score}`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  GAME OVER
+// ═══════════════════════════════════════════════════════════════
+function triggerGameOver() {
+  gameAlive = false;
+  hideSwordArc();
+  const el = document.getElementById('game-over');
+  document.getElementById('final-score').textContent = `Score: ${score}`;
+  document.getElementById('final-wave').textContent  = `Reached wave ${wave}`;
+  el.style.display = 'flex';
+  renderer.render(scene, camera);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MAIN LOOP
+// ═══════════════════════════════════════════════════════════════
+let lastTs = null;
+
+function loop(ts) {
+  if (!gameAlive) return;
+  requestAnimationFrame(loop);
+
+  const dt = lastTs === null ? 0 : Math.min((ts - lastTs) / 1000, 0.1);
+  lastTs = ts;
+
+  // ── Input → movement direction ──────────────────────────────
+  const mv = jActive ? jVec : getKeyVec();
+  const moving = Math.hypot(mv.x, mv.y) > 0.02;
+
+  if (moving) {
+    // Update facing toward movement
+    player.facing = Math.atan2(mv.y, mv.x);
+
+    // Slide-axis collision
+    const dx = mv.x * PLAYER_SPEED * dt;
+    const dy = mv.y * PLAYER_SPEED * dt;
+    if (!isWallAt(player.x + dx, player.y))       player.x += dx;
+    if (!isWallAt(player.x,       player.y + dy))  player.y += dy;
+  }
+
+  // ── Auto sword attack ────────────────────────────────────────
+  if (player.swordCooldown > 0) player.swordCooldown -= dt;
+
+  if (!player.sweeping && player.swordCooldown <= 0) {
+    // Check if any enemy is in range to trigger swing
+    const inRange = enemies.some(
+      e => !e.dead && Math.hypot(e.x - player.x, e.y - player.y) < SWORD_RANGE * 1.6
+    );
+    if (inRange) {
+      player.sweeping  = true;
+      player.sweepTime = 0;
+      player.hitSet    = new Set();
+    }
+  }
+
+  if (player.sweeping) {
+    player.sweepTime += dt;
+    const progress = player.sweepTime / SWORD_SWEEP_DUR;
+
+    if (progress >= 1) {
+      player.sweeping       = false;
+      player.swordCooldown  = SWORD_COOLDOWN;
+      hideSwordArc();
+    } else {
+      showSwordArc(player.x, player.y, player.facing, progress);
+
+      // Hit enemies inside arc (once per swing)
+      for (const e of enemies) {
+        if (!e.dead && !player.hitSet.has(e) && enemyInArc(e.x, e.y)) {
+          e.hp -= 1;
+          player.hitSet.add(e);
+          if (e.hp <= 0) {
+            e.destroy();
+            score += 10 * wave;
+          }
+        }
+      }
+    }
+  }
+
+  // ── Enemy speed for this wave ────────────────────────────────
+  const enemySpeed = ENEMY_SPEED_BASE + wave * ENEMY_SPEED_SCALE;
+
+  // ── Update enemies ───────────────────────────────────────────
+  for (const e of enemies) {
+    if (e.dead) continue;
+    e.update(dt, player.x, player.y, enemySpeed);
+
+    // Contact damage to player
+    if (e.damageCooldown <= 0 && Math.hypot(e.x - player.x, e.y - player.y) < PLAYER_RADIUS + ENEMY_RADIUS + 0.1) {
+      player.hp -= ENEMY_DAMAGE;
+      e.damageCooldown = ENEMY_DAMAGE_CD;
+      if (player.hp <= 0) { triggerGameOver(); return; }
+    }
+  }
+
+  // ── Cull dead enemies ────────────────────────────────────────
+  enemies = enemies.filter(e => !e.dead);
+
+  // ── Wave cleared? ────────────────────────────────────────────
+  if (enemies.length === 0) {
+    wave += 1;
+    spawnWave(wave);
+  }
+
+  // ── Camera follows player ────────────────────────────────────
+  camera.position.x = player.x;
+  camera.position.y = player.y;
+
+  // ── Player mesh ──────────────────────────────────────────────
+  playerBody.position.set(player.x, player.y, 0.1);
+  facingDot.position.set(
+    player.x + Math.cos(player.facing) * 0.62,
+    player.y + Math.sin(player.facing) * 0.62,
+    0.12
+  );
+
+  updateHUD();
+  renderer.render(scene, camera);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  RESIZE
+// ═══════════════════════════════════════════════════════════════
+window.addEventListener('resize', () => {
+  const a = innerWidth / innerHeight;
+  camera.left   = -VIEW_HALF * a;
+  camera.right  =  VIEW_HALF * a;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  KICK OFF
+// ═══════════════════════════════════════════════════════════════
+updateHUD();
+spawnWave(1);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
